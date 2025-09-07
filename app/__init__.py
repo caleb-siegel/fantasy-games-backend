@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, request, make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_jwt_extended import JWTManager
 from flask_cors import CORS
@@ -24,21 +24,14 @@ def create_app():
     app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'jwt-secret-string')
     app.config['JWT_ACCESS_TOKEN_EXPIRES'] = False  # Tokens don't expire for simplicity
     
-    # CORS configuration
-    cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173,http://localhost:8080,https://fantasy-games-xi.vercel.app').split(',')
+    # CORS configuration - allow all origins for now to test
+    cors_origins = os.getenv('CORS_ORIGINS', '*').split(',')
     app.config['CORS_ORIGINS'] = cors_origins
     
     # Initialize extensions with app
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
-    
-    # CORS configuration with additional headers
-    CORS(app, 
-         origins=cors_origins,
-         supports_credentials=True,
-         allow_headers=['Content-Type', 'Authorization'],
-         methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
     
     # Import and register blueprints
     from app.routes.auth import auth_bp
@@ -51,9 +44,18 @@ def create_app():
     app.register_blueprint(bets_bp, url_prefix='/api/bets')
     app.register_blueprint(results_bp, url_prefix='/api/results')
     
+    # CORS configuration with additional headers (after blueprints)
+    CORS(app, 
+         origins=cors_origins,
+         supports_credentials=False,  # Set to False when using wildcard origins
+         allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+         methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD'],
+         expose_headers=['Authorization'])
+    
     # Health check endpoint
     @app.route('/api/health')
     def health_check():
         return {'status': 'healthy', 'message': 'Fantasy Betting API is running'}
+    
     
     return app

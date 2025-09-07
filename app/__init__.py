@@ -25,14 +25,20 @@ def create_app():
     app.config['JWT_ACCESS_TOKEN_EXPIRES'] = False  # Tokens don't expire for simplicity
     
     # CORS configuration
-    cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173,http://localhost:8080').split(',')
+    cors_origins = os.getenv('CORS_ORIGINS', 'http://localhost:3000,http://localhost:5173,http://localhost:8080,https://fantasy-games-xi.vercel.app').split(',')
     app.config['CORS_ORIGINS'] = cors_origins
     
     # Initialize extensions with app
     db.init_app(app)
     jwt.init_app(app)
     migrate.init_app(app, db)
-    CORS(app, origins=cors_origins)
+    
+    # CORS configuration with additional headers
+    CORS(app, 
+         origins=cors_origins,
+         supports_credentials=True,
+         allow_headers=['Content-Type', 'Authorization'],
+         methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
     
     # Import and register blueprints
     from app.routes.auth import auth_bp

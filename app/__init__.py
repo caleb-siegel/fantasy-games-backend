@@ -58,20 +58,41 @@ def create_app():
     # Explicit CORS handling for all routes
     @app.after_request
     def after_request(response):
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Requested-With,Accept')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS,HEAD')
-        response.headers.add('Access-Control-Expose-Headers', 'Authorization')
+        print(f"=== AFTER REQUEST ===")
+        print(f"Method: {request.method}")
+        print(f"Path: {request.path}")
+        print(f"Status: {response.status_code}")
+        print(f"Original headers: {dict(response.headers)}")
+        
+        # Only add headers if they don't already exist
+        if 'Access-Control-Allow-Origin' not in response.headers:
+            response.headers['Access-Control-Allow-Origin'] = '*'
+        if 'Access-Control-Allow-Headers' not in response.headers:
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With,Accept'
+        if 'Access-Control-Allow-Methods' not in response.headers:
+            response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS,HEAD'
+        if 'Access-Control-Expose-Headers' not in response.headers:
+            response.headers['Access-Control-Expose-Headers'] = 'Authorization'
+        
+        print(f"Final headers: {dict(response.headers)}")
+        print(f"=== END AFTER REQUEST ===")
         return response
     
     # Handle preflight OPTIONS requests
     @app.before_request
     def handle_preflight():
+        print(f"=== BEFORE REQUEST ===")
+        print(f"Method: {request.method}")
+        print(f"Path: {request.path}")
+        print(f"Origin: {request.headers.get('Origin')}")
+        
         if request.method == "OPTIONS":
+            print("Handling OPTIONS preflight request")
             response = make_response()
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            response.headers.add('Access-Control-Allow-Headers', "Content-Type,Authorization,X-Requested-With,Accept")
-            response.headers.add('Access-Control-Allow-Methods', "GET,PUT,POST,DELETE,OPTIONS,HEAD")
+            # Don't add headers here - let after_request handle them
+            print(f"OPTIONS response created")
             return response
+        else:
+            print(f"Non-OPTIONS request: {request.method} {request.path}")
     
     return app

@@ -2,7 +2,9 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
 from app.models import User, League, LeagueMember, Matchup
+from datetime import datetime
 import itertools
+import random
 
 leagues_bp = Blueprint('leagues', __name__)
 
@@ -264,3 +266,194 @@ def generate_schedule(league_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'Failed to generate schedule', 'details': str(e)}), 500
+
+@leagues_bp.route('/<int:league_id>/confirm-setup', methods=['POST'])
+@jwt_required()
+def confirm_league_setup(league_id):
+    """Commissioner confirms league setup and generates all matchups"""
+    try:
+        user_id = int(get_jwt_identity())
+        
+        # Get league and verify commissioner
+        league = League.query.get(league_id)
+        if not league:
+            return jsonify({'error': 'League not found'}), 404
+        
+        if league.commissioner_id != user_id:
+            return jsonify({'error': 'Only the commissioner can confirm league setup'}), 403
+        
+        if league.is_setup_complete:
+            return jsonify({'error': 'League setup is already complete'}), 400
+        
+        # Get all league members
+        members = LeagueMember.query.filter_by(league_id=league_id).all()
+        member_ids = [member.user_id for member in members]
+        
+        if len(member_ids) < 2:
+            return jsonify({'error': 'League must have at least 2 members to generate matchups'}), 400
+        
+        # Generate regular season matchups (weeks 1-14)
+        regular_season_matchups = generate_regular_season_matchups(league_id, member_ids)
+        
+        # Generate playoff matchups (weeks 15-17)
+        playoff_matchups = generate_playoff_matchups(league_id, member_ids)
+        
+        # Add all matchups to database
+        all_matchups = regular_season_matchups + playoff_matchups
+        for matchup in all_matchups:
+            db.session.add(matchup)
+        
+        # Mark league as setup complete
+        league.is_setup_complete = True
+        league.setup_completed_at = datetime.utcnow()
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'League setup confirmed successfully',
+            'regular_season_matchups': len(regular_season_matchups),
+            'playoff_matchups': len(playoff_matchups),
+            'total_matchups': len(all_matchups)
+        }), 200
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to confirm league setup', 'details': str(e)}), 500
+
+def generate_regular_season_matchups(league_id, member_ids):
+    """Generate regular season matchups for weeks 1-14"""
+    matchups = []
+    
+    # Create a copy of member_ids to work with
+    members = member_ids.copy()
+    
+    # For odd number of members, add a "bye" member (use -1 as placeholder)
+    if len(members) % 2 == 1:
+        members.append(-1)
+    
+    # Generate matchups for each week
+    for week in range(1, 15):  # weeks 1-14
+        week_matchups = []
+        
+        # Rotate members for each week (round-robin style)
+        if week > 1:
+            # Move first member to end, shift others up
+            members = members[1:] + [members[0]]
+        
+        # Pair up members
+        for i in range(0, len(members), 2):
+            user1_id = members[i]
+            user2_id = members[i + 1]
+            
+            # Skip if either is a bye week
+            if user1_id == -1 or user2_id == -1:
+                continue
+            
+            matchup = Matchup(
+                league_id=league_id,
+                week=week,
+                user1_id=user1_id,
+                user2_id=user2_id
+            )
+            week_matchups.append(matchup)
+        
+        matchups.extend(week_matchups)
+    
+    return matchups
+
+def generate_playoff_matchups(league_id, member_ids):
+    """Generate playoff bracket for weeks 15-17"""
+    matchups = []
+    
+    # For playoffs, we'll use a simple bracket system
+    # Week 15: Quarterfinals (if 8+ members) or Semifinals (if 4-7 members)
+    # Week 16: Semifinals (if 8+ members) or Finals (if 4-7 members)  
+    # Week 17: Finals (if 8+ members) or Championship (if 4-7 members)
+    
+    num_members = len(member_ids)
+    
+    if num_members >= 8:
+        # 8+ members: Full bracket
+        # Week 15: Quarterfinals (8 teams -> 4 teams)
+        # Week 16: Semifinals (4 teams -> 2 teams)
+        # Week 17: Finals (2 teams -> 1 champion)
+        
+        # For now, we'll create placeholder matchups that will be filled based on regular season standings
+        # The actual seeding will be determined by regular season performance
+        
+        # Week 15 - Quarterfinals (4 matchups)
+        for i in range(4):
+            if i * 2 + 1 < len(member_ids):
+                matchup = Matchup(
+                    league_id=league_id,
+                    week=15,
+                    user1_id=member_ids[i * 2],
+                    user2_id=member_ids[i * 2 + 1]
+                )
+                matchups.append(matchup)
+        
+        # Week 16 - Semifinals (2 matchups) - Use actual members for now
+        # In a real implementation, these would be filled by quarterfinal winners
+        semifinal_members = member_ids[4:8] if len(member_ids) >= 8 else member_ids[2:4]
+        for i in range(2):
+            if i * 2 + 1 < len(semifinal_members):
+                matchup = Matchup(
+                    league_id=league_id,
+                    week=16,
+                    user1_id=semifinal_members[i * 2],
+                    user2_id=semifinal_members[i * 2 + 1]
+                )
+                matchups.append(matchup)
+        
+        # Week 17 - Finals (1 matchup) - Use actual members for now
+        # In a real implementation, this would be filled by semifinal winners
+        if len(member_ids) >= 2:
+            matchup = Matchup(
+                league_id=league_id,
+                week=17,
+                user1_id=member_ids[0],
+                user2_id=member_ids[1]
+            )
+            matchups.append(matchup)
+        
+    elif num_members >= 4:
+        # 4-7 members: Smaller bracket
+        # Week 15: Semifinals (4 teams -> 2 teams)
+        # Week 16: Finals (2 teams -> 1 champion)
+        # Week 17: No games (or consolation)
+        
+        # Week 15 - Semifinals
+        for i in range(min(2, num_members // 2)):
+            if i * 2 + 1 < len(member_ids):
+                matchup = Matchup(
+                    league_id=league_id,
+                    week=15,
+                    user1_id=member_ids[i * 2],
+                    user2_id=member_ids[i * 2 + 1]
+                )
+                matchups.append(matchup)
+        
+        # Week 16 - Finals - Use actual members for now
+        # In a real implementation, this would be filled by semifinal winners
+        if len(member_ids) >= 2:
+            matchup = Matchup(
+                league_id=league_id,
+                week=16,
+                user1_id=member_ids[0],
+                user2_id=member_ids[1]
+            )
+            matchups.append(matchup)
+        
+    else:
+        # Less than 4 members: Simple head-to-head for remaining weeks
+        for week in range(15, 18):
+            if len(member_ids) >= 2:
+                matchup = Matchup(
+                    league_id=league_id,
+                    week=week,
+                    user1_id=member_ids[0],
+                    user2_id=member_ids[1]
+                )
+                matchups.append(matchup)
+    
+    return matchups

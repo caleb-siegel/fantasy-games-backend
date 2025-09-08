@@ -44,6 +44,8 @@ class League(db.Model):
     name = db.Column(db.String(100), nullable=False)
     commissioner_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     invite_code = db.Column(db.String(8), unique=True, nullable=False)
+    is_setup_complete = db.Column(db.Boolean, default=False, nullable=False)
+    setup_completed_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -68,6 +70,8 @@ class League(db.Model):
             'name': self.name,
             'commissioner_id': self.commissioner_id,
             'invite_code': self.invite_code,
+            'is_setup_complete': self.is_setup_complete,
+            'setup_completed_at': self.setup_completed_at.isoformat() if self.setup_completed_at else None,
             'created_at': self.created_at.isoformat(),
             'member_count': self.members.count()
         }
@@ -133,26 +137,26 @@ class Bet(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     matchup_id = db.Column(db.Integer, db.ForeignKey('matchups.id'), nullable=False)
-    game_id = db.Column(db.String(50), nullable=False)  # From odds API
-    team = db.Column(db.String(50), nullable=False)
+    betting_option_id = db.Column(db.Integer, db.ForeignKey('betting_options.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
-    odds = db.Column(db.Float, nullable=False)
     potential_payout = db.Column(db.Float, nullable=False)
-    status = db.Column(db.String(20), default='pending')  # pending, won, lost
+    status = db.Column(db.String(20), default='pending')  # pending, locked, won, lost
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    betting_option = db.relationship('BettingOption', backref='bets')
     
     def to_dict(self):
         return {
             'id': self.id,
             'user_id': self.user_id,
             'matchup_id': self.matchup_id,
-            'game_id': self.game_id,
-            'team': self.team,
+            'betting_option_id': self.betting_option_id,
             'amount': self.amount,
-            'odds': self.odds,
             'potential_payout': self.potential_payout,
             'status': self.status,
-            'created_at': self.created_at.isoformat()
+            'created_at': self.created_at.isoformat(),
+            'betting_option': self.betting_option.to_dict() if self.betting_option else None
         }
 
 class Game(db.Model):
@@ -166,6 +170,9 @@ class Game(db.Model):
     result = db.Column(db.String(20), nullable=True)  # home_win, away_win, null
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
+    # Relationships
+    betting_options = db.relationship('BettingOption', backref='game', lazy='dynamic')
+    
     def to_dict(self):
         return {
             'id': self.id,
@@ -175,4 +182,31 @@ class Game(db.Model):
             'week': self.week,
             'result': self.result,
             'created_at': self.created_at.isoformat()
+        }
+
+class BettingOption(db.Model):
+    __tablename__ = 'betting_options'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    game_id = db.Column(db.String(50), db.ForeignKey('games.id'), nullable=False)
+    market_type = db.Column(db.String(20), nullable=False)  # h2h, spreads, totals
+    outcome_name = db.Column(db.String(100), nullable=False)  # Team name or "Over"/"Under"
+    outcome_point = db.Column(db.Float, nullable=True)  # For spreads/totals
+    bookmaker = db.Column(db.String(50), nullable=False)  # fanduel, draftkings, etc.
+    american_odds = db.Column(db.Integer, nullable=False)  # -110, +150, etc.
+    decimal_odds = db.Column(db.Float, nullable=False)  # 1.91, 2.50, etc.
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'game_id': self.game_id,
+            'market_type': self.market_type,
+            'outcome_name': self.outcome_name,
+            'outcome_point': self.outcome_point,
+            'bookmaker': self.bookmaker,
+            'american_odds': self.american_odds,
+            'decimal_odds': self.decimal_odds,
+            'created_at': self.created_at.isoformat(),
+            'game': self.game.to_dict() if self.game else None
         }

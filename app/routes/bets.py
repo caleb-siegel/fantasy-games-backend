@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
-from app.models import User, LeagueMember, Matchup, Bet, Game
+from app.models import User, LeagueMember, Matchup, Bet, Game, BettingOption
 from app.services.odds_service import OddsService
 from datetime import datetime, timedelta
 import os
@@ -11,53 +11,69 @@ bets_bp = Blueprint('bets', __name__)
 # Initialize odds service
 odds_service = OddsService()
 
-@bets_bp.route('/odds/week/<int:week>', methods=['GET'])
-@jwt_required()
-def get_weekly_odds(week):
-    """Get NFL moneyline odds for a specific week"""
+
+@bets_bp.route('/options/week/<int:week>', methods=['GET'])
+def get_weekly_betting_options(week):
+    """Get all betting options for a specific week organized by game"""
     try:
-        # Get odds from external API
-        odds_data = odds_service.get_nfl_odds(week)
+        # Get all games for the week
+        games = Game.query.filter_by(week=week).all()
         
-        if not odds_data:
-            return jsonify({'error': 'No odds data available for this week'}), 404
+        games_with_options = []
+        for game in games:
+            # Get all betting options for this game
+            betting_options = BettingOption.query.filter_by(game_id=game.id).all()
+            
+            # Organize options by market type
+            organized_options = {}
+            for option in betting_options:
+                market_type = option.market_type
+                if market_type not in organized_options:
+                    organized_options[market_type] = {}
+                
+                outcome_key = f"{option.outcome_name}_{option.outcome_point or ''}"
+                if outcome_key not in organized_options[market_type]:
+                    organized_options[market_type][outcome_key] = {
+                        'outcome_name': option.outcome_name,
+                        'outcome_point': option.outcome_point,
+                        'bookmakers': []
+                    }
+                
+                organized_options[market_type][outcome_key]['bookmakers'].append({
+                    'id': option.id,
+                    'bookmaker': option.bookmaker,
+                    'american_odds': option.american_odds,
+                    'decimal_odds': option.decimal_odds
+                })
+            
+            games_with_options.append({
+                'game': game.to_dict(),
+                'betting_options': organized_options
+            })
         
-        # Store games in database if not already present
-        for game_data in odds_data:
-            existing_game = Game.query.get(game_data['id'])
-            if not existing_game:
-                game = Game(
-                    id=game_data['id'],
-                    home_team=game_data['home_team'],
-                    away_team=game_data['away_team'],
-                    start_time=datetime.fromisoformat(game_data['start_time']),
-                    week=week
-                )
-                db.session.add(game)
-        
-        db.session.commit()
-        
-        return jsonify({'odds': odds_data}), 200
+        return jsonify({
+            'week': week,
+            'games': games_with_options
+        }), 200
         
     except Exception as e:
-        return jsonify({'error': 'Failed to get odds', 'details': str(e)}), 500
+        return jsonify({'error': 'Failed to get betting options', 'details': str(e)}), 500
 
 @bets_bp.route('', methods=['POST'])
 @jwt_required()
 def place_bet():
-    """Place a bet on a game"""
+    """Place a bet on a betting option"""
     try:
         data = request.get_json()
         user_id = int(get_jwt_identity())
         
         # Validate required fields
-        required_fields = ['matchup_id', 'game_id', 'team', 'amount']
+        required_fields = ['matchup_id', 'betting_option_id', 'amount']
         if not data or not all(field in data for field in required_fields):
             return jsonify({'error': 'Missing required fields'}), 400
         
         matchup_id = data['matchup_id']
-        game_id = data['game_id']
-        team = data['team']
+        betting_option_id = data['betting_option_id']
         amount = float(data['amount'])
         
         # Validate amount
@@ -72,54 +88,38 @@ def place_bet():
         if user_id not in [matchup.user1_id, matchup.user2_id]:
             return jsonify({'error': 'You are not part of this matchup'}), 403
         
-        # Check if game exists
-        game = Game.query.get(game_id)
-        if not game:
-            return jsonify({'error': 'Game not found'}), 404
+        # Check if betting option exists
+        betting_option = BettingOption.query.get(betting_option_id)
+        if not betting_option:
+            return jsonify({'error': 'Betting option not found'}), 404
         
         # Check if game has already started
+        game = betting_option.game
         if datetime.utcnow() >= game.start_time:
             return jsonify({'error': 'Cannot bet on games that have already started'}), 400
         
-        # Calculate weekly balance used
-        weekly_bets = Bet.query.filter_by(
+        # Calculate total bets for this user in this matchup
+        existing_bets = Bet.query.filter_by(
             user_id=user_id,
             matchup_id=matchup_id
         ).all()
         
-        total_bet_amount = sum(bet.amount for bet in weekly_bets)
+        total_bet_amount = sum(bet.amount for bet in existing_bets)
         
         if total_bet_amount + amount > 100:
             return jsonify({
                 'error': f'Weekly limit exceeded. You have ${100 - total_bet_amount:.2f} remaining'
             }), 400
         
-        # Get current odds for the team
-        odds_data = odds_service.get_game_odds(game_id)
-        if not odds_data:
-            return jsonify({'error': 'Odds not available for this game'}), 400
-        
-        # Find the odds for the selected team
-        team_odds = None
-        if team == game.home_team:
-            team_odds = odds_data.get('home_odds')
-        elif team == game.away_team:
-            team_odds = odds_data.get('away_odds')
-        
-        if not team_odds:
-            return jsonify({'error': 'Invalid team selection'}), 400
-        
         # Calculate potential payout
-        potential_payout = amount * team_odds
+        potential_payout = amount * betting_option.decimal_odds
         
         # Create bet
         bet = Bet(
             user_id=user_id,
             matchup_id=matchup_id,
-            game_id=game_id,
-            team=team,
+            betting_option_id=betting_option_id,
             amount=amount,
-            odds=team_odds,
             potential_payout=potential_payout,
             status='pending'
         )
@@ -137,6 +137,160 @@ def place_bet():
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': 'Failed to place bet', 'details': str(e)}), 500
+
+@bets_bp.route('/batch', methods=['POST'])
+@jwt_required()
+def place_batch_bets():
+    """Place multiple bets at once"""
+    try:
+        data = request.get_json()
+        user_id = int(get_jwt_identity())
+        
+        # Validate required fields
+        if not data or 'bets' not in data:
+            return jsonify({'error': 'Missing bets array'}), 400
+        
+        bets_data = data['bets']
+        if not isinstance(bets_data, list) or len(bets_data) == 0:
+            return jsonify({'error': 'Bets must be a non-empty array'}), 400
+        
+        # Validate each bet
+        for i, bet_data in enumerate(bets_data):
+            required_fields = ['matchup_id', 'betting_option_id', 'amount']
+            if not all(field in bet_data for field in required_fields):
+                return jsonify({'error': f'Bet {i+1} missing required fields'}), 400
+            
+            amount = float(bet_data['amount'])
+            if amount <= 0 or amount > 100:
+                return jsonify({'error': f'Bet {i+1} amount must be between $1 and $100'}), 400
+        
+        # Calculate total bet amount
+        total_amount = sum(float(bet['amount']) for bet in bets_data)
+        if total_amount > 100:
+            return jsonify({'error': f'Total bet amount ${total_amount:.2f} exceeds weekly limit of $100'}), 400
+        
+        # Check existing bets for this user in all matchups
+        matchup_ids = list(set(bet['matchup_id'] for bet in bets_data))
+        existing_bets = Bet.query.filter(
+            Bet.user_id == user_id,
+            Bet.matchup_id.in_(matchup_ids)
+        ).all()
+        
+        existing_total = sum(bet.amount for bet in existing_bets)
+        if existing_total + total_amount > 100:
+            return jsonify({
+                'error': f'Weekly limit exceeded. You have ${100 - existing_total:.2f} remaining'
+            }), 400
+        
+        # Validate all betting options and matchups
+        placed_bets = []
+        for bet_data in bets_data:
+            matchup_id = bet_data['matchup_id']
+            betting_option_id = bet_data['betting_option_id']
+            amount = float(bet_data['amount'])
+            
+            # Check if user is part of the matchup
+            matchup = Matchup.query.get(matchup_id)
+            if not matchup:
+                return jsonify({'error': f'Matchup {matchup_id} not found'}), 404
+            
+            if user_id not in [matchup.user1_id, matchup.user2_id]:
+                return jsonify({'error': 'You are not part of one or more matchups'}), 403
+            
+            # Check if betting option exists
+            betting_option = BettingOption.query.get(betting_option_id)
+            if not betting_option:
+                return jsonify({'error': f'Betting option {betting_option_id} not found'}), 404
+            
+            # Check if game has already started
+            game = betting_option.game
+            if datetime.utcnow() >= game.start_time:
+                return jsonify({'error': 'Cannot bet on games that have already started'}), 400
+            
+            # Calculate potential payout
+            potential_payout = amount * betting_option.decimal_odds
+            
+            # Create bet
+            bet = Bet(
+                user_id=user_id,
+                matchup_id=matchup_id,
+                betting_option_id=betting_option_id,
+                amount=amount,
+                potential_payout=potential_payout,
+                status='pending'
+            )
+            
+            db.session.add(bet)
+            placed_bets.append(bet)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': f'Successfully placed {len(placed_bets)} bets',
+            'bets': [bet.to_dict() for bet in placed_bets],
+            'total_amount': total_amount
+        }), 201
+        
+    except ValueError as e:
+        return jsonify({'error': 'Invalid bet data'}), 400
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to place bets', 'details': str(e)}), 500
+
+@bets_bp.route('/matchup/<int:league_id>/<int:week>', methods=['GET'])
+@jwt_required()
+def get_user_matchup(league_id, week):
+    """Get the user's matchup for a specific league and week"""
+    try:
+        user_id = int(get_jwt_identity())
+        
+        # Find the matchup where the user is participating in this league and week
+        matchup = Matchup.query.filter(
+            Matchup.league_id == league_id,
+            Matchup.week == week,
+            (Matchup.user1_id == user_id) | (Matchup.user2_id == user_id)
+        ).first()
+        
+        if not matchup:
+            return jsonify({'error': 'No matchup found for this league and week'}), 404
+        
+        return jsonify({'matchup': matchup.to_dict()}), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to get matchup', 'details': str(e)}), 500
+
+@bets_bp.route('/matchup/<int:matchup_id>/user/<int:user_id>', methods=['GET'])
+@jwt_required()
+def get_user_bets_for_matchup(matchup_id, user_id):
+    """Get all bets for a specific user in a specific matchup"""
+    try:
+        current_user_id = int(get_jwt_identity())
+        
+        # Verify the matchup exists and user is part of it
+        matchup = Matchup.query.get(matchup_id)
+        if not matchup:
+            return jsonify({'error': 'Matchup not found'}), 404
+        
+        if user_id not in [matchup.user1_id, matchup.user2_id]:
+            return jsonify({'error': 'User is not part of this matchup'}), 403
+        
+        # Get all bets for this user in this matchup
+        bets = Bet.query.filter_by(
+            user_id=user_id,
+            matchup_id=matchup_id
+        ).all()
+        
+        bets_data = [bet.to_dict() for bet in bets]
+        
+        return jsonify({
+            'bets': bets_data,
+            'matchup_id': matchup_id,
+            'user_id': user_id,
+            'week': matchup.week
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to get user bets for matchup', 'details': str(e)}), 500
 
 @bets_bp.route('/user/<int:week>', methods=['GET'])
 @jwt_required()
@@ -175,45 +329,108 @@ def get_user_bets(week):
     except Exception as e:
         return jsonify({'error': 'Failed to get user bets', 'details': str(e)}), 500
 
-@bets_bp.route('/matchup/<int:matchup_id>', methods=['GET'])
+
+
+@bets_bp.route('/admin/force-update', methods=['POST'])
+def force_update_odds():
+    """Force update odds (admin only)"""
+    try:
+        # For testing purposes, allow without auth
+        # In production, you might want to check for admin role
+        
+        data = request.get_json() or {}
+        week = data.get('week', 1)
+        
+        # Manually update odds for the specified week
+        odds_service = OddsService()
+        odds_data = odds_service.get_nfl_odds(week)
+        
+        if odds_data:
+            updated_games = 0
+            new_games = 0
+            
+            for game_data in odds_data:
+                existing_game = Game.query.get(game_data['id'])
+                
+                if existing_game:
+                    # Update existing game
+                    existing_game.home_team = game_data['home_team']
+                    existing_game.away_team = game_data['away_team']
+                    existing_game.start_time = datetime.fromisoformat(game_data['start_time'])
+                    updated_games += 1
+                else:
+                    # Create new game
+                    game = Game(
+                        id=game_data['id'],
+                        home_team=game_data['home_team'],
+                        away_team=game_data['away_team'],
+                        start_time=datetime.fromisoformat(game_data['start_time']),
+                        week=week
+                    )
+                    db.session.add(game)
+                    new_games += 1
+            
+            db.session.commit()
+            message = f"Updated {updated_games} games, Added {new_games} new games for week {week}"
+        else:
+            message = f"No odds data available for week {week}"
+        
+        return jsonify({'message': message}), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to force update', 'details': str(e)}), 500
+
+@bets_bp.route('/admin/process-outcomes', methods=['POST'])
 @jwt_required()
-def get_matchup_bets(matchup_id):
-    """Get all bets for a specific matchup"""
+def force_process_outcomes():
+    """Force process bet outcomes (admin only)"""
     try:
         user_id = int(get_jwt_identity())
         
-        # Check if user is part of the matchup
-        matchup = Matchup.query.get(matchup_id)
-        if not matchup:
-            return jsonify({'error': 'Matchup not found'}), 404
+        # Check if user is admin (for now, any authenticated user can do this)
         
-        if user_id not in [matchup.user1_id, matchup.user2_id]:
-            return jsonify({'error': 'You are not part of this matchup'}), 403
+        # Manually process bet outcomes
+        odds_service = OddsService()
+        current_time = datetime.utcnow()
         
-        # Get all bets for this matchup
-        bets = Bet.query.filter_by(matchup_id=matchup_id).all()
+        # Find completed games that haven't been processed
+        completed_games = Game.query.filter(
+            Game.start_time < current_time,
+            Game.result.is_(None)
+        ).all()
         
-        # Separate bets by user
-        user1_bets = [bet.to_dict() for bet in bets if bet.user_id == matchup.user1_id]
-        user2_bets = [bet.to_dict() for bet in bets if bet.user_id == matchup.user2_id]
+        processed_bets = 0
         
-        # Calculate totals
-        user1_total = sum(bet['amount'] for bet in user1_bets)
-        user2_total = sum(bet['amount'] for bet in user2_bets)
+        for game in completed_games:
+            # Get game result from API
+            game_result = odds_service.get_game_result(game.id)
+            
+            if game_result:
+                game.result = game_result
+                
+                # Process all bets for this game
+                bets = Bet.query.filter_by(game_id=game.id).filter(
+                    Bet.status.in_(['pending', 'locked'])
+                ).all()
+                
+                for bet in bets:
+                    # Determine if bet won or lost
+                    if game_result == 'home_win' and bet.team == game.home_team:
+                        bet.status = 'won'
+                    elif game_result == 'away_win' and bet.team == game.away_team:
+                        bet.status = 'won'
+                    else:
+                        bet.status = 'lost'
+                    
+                    processed_bets += 1
         
-        return jsonify({
-            'matchup': matchup.to_dict(),
-            'user1_bets': {
-                'bets': user1_bets,
-                'total_amount': user1_total,
-                'remaining_balance': 100 - user1_total
-            },
-            'user2_bets': {
-                'bets': user2_bets,
-                'total_amount': user2_total,
-                'remaining_balance': 100 - user2_total
-            }
-        }), 200
+        if processed_bets > 0:
+            db.session.commit()
+            message = f"Processed {processed_bets} bet outcomes"
+        else:
+            message = "No bet outcomes to process"
+        
+        return jsonify({'message': message}), 200
         
     except Exception as e:
-        return jsonify({'error': 'Failed to get matchup bets', 'details': str(e)}), 500
+        return jsonify({'error': 'Failed to process outcomes', 'details': str(e)}), 500

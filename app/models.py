@@ -140,7 +140,12 @@ class Bet(db.Model):
     betting_option_id = db.Column(db.Integer, db.ForeignKey('betting_options.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
     potential_payout = db.Column(db.Float, nullable=False)
-    status = db.Column(db.String(20), default='pending')  # pending, locked, won, lost
+    status = db.Column(db.String(20), default='pending')  # pending, locked, won, lost, cancelled
+    week = db.Column(db.Integer, nullable=False)
+    locked_at = db.Column(db.DateTime, nullable=True)
+    odds_snapshot_decimal = db.Column(db.Float, nullable=True)
+    odds_snapshot_american = db.Column(db.Integer, nullable=True)
+    bookmaker_snapshot = db.Column(db.String(50), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     # Relationships
@@ -155,6 +160,11 @@ class Bet(db.Model):
             'amount': self.amount,
             'potential_payout': self.potential_payout,
             'status': self.status,
+            'week': self.week,
+            'locked_at': self.locked_at.isoformat() if self.locked_at else None,
+            'odds_snapshot_decimal': self.odds_snapshot_decimal,
+            'odds_snapshot_american': self.odds_snapshot_american,
+            'bookmaker_snapshot': self.bookmaker_snapshot,
             'created_at': self.created_at.isoformat(),
             'betting_option': self.betting_option.to_dict() if self.betting_option else None
         }
@@ -195,6 +205,8 @@ class BettingOption(db.Model):
     bookmaker = db.Column(db.String(50), nullable=False)  # fanduel, draftkings, etc.
     american_odds = db.Column(db.Integer, nullable=False)  # -110, +150, etc.
     decimal_odds = db.Column(db.Float, nullable=False)  # 1.91, 2.50, etc.
+    is_locked = db.Column(db.Boolean, default=False)
+    locked_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     
     def to_dict(self):
@@ -207,6 +219,8 @@ class BettingOption(db.Model):
             'bookmaker': self.bookmaker,
             'american_odds': self.american_odds,
             'decimal_odds': self.decimal_odds,
+            'is_locked': self.is_locked,
+            'locked_at': self.locked_at.isoformat() if self.locked_at else None,
             'created_at': self.created_at.isoformat(),
             'game': self.game.to_dict() if self.game else None
         }

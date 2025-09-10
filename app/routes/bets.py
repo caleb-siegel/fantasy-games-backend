@@ -11,6 +11,11 @@ bets_bp = Blueprint('bets', __name__)
 # Initialize odds service
 odds_service = OddsService()
 
+def check_user_league_membership(user_id):
+    """Check if user is a member of any league"""
+    membership = LeagueMember.query.filter_by(user_id=user_id).first()
+    return membership is not None
+
 
 @bets_bp.route('/options/week/<int:week>', methods=['GET'])
 def get_weekly_betting_options(week):
@@ -67,14 +72,19 @@ def place_bet():
         data = request.get_json()
         user_id = int(get_jwt_identity())
         
+        # Check if user is a member of any league
+        if not check_user_league_membership(user_id):
+            return jsonify({'error': 'You must join a league before placing bets'}), 403
+        
         # Validate required fields
-        required_fields = ['matchup_id', 'betting_option_id', 'amount']
+        required_fields = ['matchup_id', 'betting_option_id', 'amount', 'week']
         if not data or not all(field in data for field in required_fields):
             return jsonify({'error': 'Missing required fields'}), 400
         
         matchup_id = data['matchup_id']
         betting_option_id = data['betting_option_id']
         amount = float(data['amount'])
+        week = int(data['week'])
         
         # Validate amount
         if amount <= 0 or amount > 100:
@@ -88,20 +98,23 @@ def place_bet():
         if user_id not in [matchup.user1_id, matchup.user2_id]:
             return jsonify({'error': 'You are not part of this matchup'}), 403
         
-        # Check if betting option exists
+        # Check if betting option exists and is not locked
         betting_option = BettingOption.query.get(betting_option_id)
         if not betting_option:
             return jsonify({'error': 'Betting option not found'}), 404
+        
+        if betting_option.is_locked:
+            return jsonify({'error': 'This betting option is locked and cannot be bet on'}), 400
         
         # Check if game has already started
         game = betting_option.game
         if datetime.utcnow() >= game.start_time:
             return jsonify({'error': 'Cannot bet on games that have already started'}), 400
         
-        # Calculate total bets for this user in this matchup
+        # Calculate total bets for this user in this week across all matchups
         existing_bets = Bet.query.filter_by(
             user_id=user_id,
-            matchup_id=matchup_id
+            week=week
         ).all()
         
         total_bet_amount = sum(bet.amount for bet in existing_bets)
@@ -111,16 +124,20 @@ def place_bet():
                 'error': f'Weekly limit exceeded. You have ${100 - total_bet_amount:.2f} remaining'
             }), 400
         
-        # Calculate potential payout
+        # Calculate potential payout using current odds
         potential_payout = amount * betting_option.decimal_odds
         
-        # Create bet
+        # Create bet with odds snapshot
         bet = Bet(
             user_id=user_id,
             matchup_id=matchup_id,
             betting_option_id=betting_option_id,
             amount=amount,
             potential_payout=potential_payout,
+            week=week,
+            odds_snapshot_decimal=betting_option.decimal_odds,
+            odds_snapshot_american=betting_option.american_odds,
+            bookmaker_snapshot=betting_option.bookmaker,
             status='pending'
         )
         
@@ -146,11 +163,17 @@ def place_batch_bets():
         data = request.get_json()
         user_id = int(get_jwt_identity())
         
+        # Check if user is a member of any league
+        if not check_user_league_membership(user_id):
+            return jsonify({'error': 'You must join a league before placing bets'}), 403
+        
         # Validate required fields
-        if not data or 'bets' not in data:
-            return jsonify({'error': 'Missing bets array'}), 400
+        if not data or 'bets' not in data or 'week' not in data:
+            return jsonify({'error': 'Missing bets array or week'}), 400
         
         bets_data = data['bets']
+        week = int(data['week'])
+        
         if not isinstance(bets_data, list) or len(bets_data) == 0:
             return jsonify({'error': 'Bets must be a non-empty array'}), 400
         
@@ -169,11 +192,10 @@ def place_batch_bets():
         if total_amount > 100:
             return jsonify({'error': f'Total bet amount ${total_amount:.2f} exceeds weekly limit of $100'}), 400
         
-        # Check existing bets for this user in all matchups
-        matchup_ids = list(set(bet['matchup_id'] for bet in bets_data))
-        existing_bets = Bet.query.filter(
-            Bet.user_id == user_id,
-            Bet.matchup_id.in_(matchup_ids)
+        # Check existing bets for this user in this week
+        existing_bets = Bet.query.filter_by(
+            user_id=user_id,
+            week=week
         ).all()
         
         existing_total = sum(bet.amount for bet in existing_bets)
@@ -197,26 +219,33 @@ def place_batch_bets():
             if user_id not in [matchup.user1_id, matchup.user2_id]:
                 return jsonify({'error': 'You are not part of one or more matchups'}), 403
             
-            # Check if betting option exists
+            # Check if betting option exists and is not locked
             betting_option = BettingOption.query.get(betting_option_id)
             if not betting_option:
                 return jsonify({'error': f'Betting option {betting_option_id} not found'}), 404
+            
+            if betting_option.is_locked:
+                return jsonify({'error': f'Betting option {betting_option_id} is locked'}), 400
             
             # Check if game has already started
             game = betting_option.game
             if datetime.utcnow() >= game.start_time:
                 return jsonify({'error': 'Cannot bet on games that have already started'}), 400
             
-            # Calculate potential payout
+            # Calculate potential payout using current odds
             potential_payout = amount * betting_option.decimal_odds
             
-            # Create bet
+            # Create bet with odds snapshot
             bet = Bet(
                 user_id=user_id,
                 matchup_id=matchup_id,
                 betting_option_id=betting_option_id,
                 amount=amount,
                 potential_payout=potential_payout,
+                week=week,
+                odds_snapshot_decimal=betting_option.decimal_odds,
+                odds_snapshot_american=betting_option.american_odds,
+                bookmaker_snapshot=betting_option.bookmaker,
                 status='pending'
             )
             

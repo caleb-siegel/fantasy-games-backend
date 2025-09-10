@@ -35,14 +35,14 @@ def create_app():
     
     # Import and register blueprints
     from app.routes.auth import auth_bp
-    from app.routes.leagues import leagues_bp
     from app.routes.bets import bets_bp
-    from app.routes.results import results_bp
+    from app.routes.enhanced_leagues import leagues_bp as enhanced_leagues_bp
+    from app.routes.enhanced_results import results_bp as enhanced_results_bp
     
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
-    app.register_blueprint(leagues_bp, url_prefix='/api/leagues')
+    app.register_blueprint(enhanced_leagues_bp, url_prefix='/api/leagues')
     app.register_blueprint(bets_bp, url_prefix='/api/bets')
-    app.register_blueprint(results_bp, url_prefix='/api/results')
+    app.register_blueprint(enhanced_results_bp, url_prefix='/api/results')
     
     # Health check endpoint
     @app.route('/api/health')

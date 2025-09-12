@@ -457,8 +457,8 @@ def get_week_matchups(league_id, week):
         # Get comprehensive matchup data with bets
         matchups_data = []
         for matchup in matchups:
-            # Get bets for both users in this matchup
-            from app.models import Bet
+            # Get regular bets for both users in this matchup
+            from app.models import Bet, ParlayBet
             user1_bets = Bet.query.filter_by(
                 matchup_id=matchup.id,
                 user_id=matchup.user1_id
@@ -469,11 +469,22 @@ def get_week_matchups(league_id, week):
                 user_id=matchup.user2_id
             ).all()
             
-            # Calculate totals
-            user1_total_bet = sum(bet.amount for bet in user1_bets)
-            user2_total_bet = sum(bet.amount for bet in user2_bets)
-            user1_potential_payout = sum(bet.potential_payout for bet in user1_bets)
-            user2_potential_payout = sum(bet.potential_payout for bet in user2_bets)
+            # Get parlay bets for both users in this matchup
+            user1_parlay_bets = ParlayBet.query.filter_by(
+                matchup_id=matchup.id,
+                user_id=matchup.user1_id
+            ).all()
+            
+            user2_parlay_bets = ParlayBet.query.filter_by(
+                matchup_id=matchup.id,
+                user_id=matchup.user2_id
+            ).all()
+            
+            # Calculate totals including parlay bets
+            user1_total_bet = sum(bet.amount for bet in user1_bets) + sum(parlay.amount for parlay in user1_parlay_bets)
+            user2_total_bet = sum(bet.amount for bet in user2_bets) + sum(parlay.amount for parlay in user2_parlay_bets)
+            user1_potential_payout = sum(bet.potential_payout for bet in user1_bets) + sum(parlay.potential_payout for parlay in user1_parlay_bets)
+            user2_potential_payout = sum(bet.potential_payout for bet in user2_bets) + sum(parlay.potential_payout for parlay in user2_parlay_bets)
             
             # Format bet data
             user1_bets_data = []
@@ -525,6 +536,95 @@ def get_week_matchups(league_id, week):
                     }
                 }
                 user2_bets_data.append(bet_data)
+            
+            # Add parlay bets to the bet data
+            for parlay in user1_parlay_bets:
+                parlay_data = {
+                    'id': f"parlay_{parlay.id}",
+                    'amount': parlay.amount,
+                    'potential_payout': parlay.potential_payout,
+                    'status': parlay.status,
+                    'betting_option': {
+                        'id': parlay.id,
+                        'outcome_name': f"Parlay ({parlay.legs.count()} legs)",
+                        'outcome_point': None,
+                        'bookmaker': 'Multiple',
+                        'american_odds': int((parlay.decimal_odds - 1) * 100) if parlay.decimal_odds > 1 else int(-100 / (parlay.decimal_odds - 1)),
+                        'decimal_odds': parlay.decimal_odds,
+                        'market_type': 'parlay'
+                    },
+                    'game': {
+                        'id': 'parlay',
+                        'home_team': 'Parlay',
+                        'away_team': 'Bet',
+                        'start_time': parlay.created_at.isoformat()
+                    },
+                    'is_parlay': True,
+                    'parlay_legs': [
+                        {
+                            'id': leg.id,
+                            'parlay_bet_id': leg.parlay_bet_id,
+                            'betting_option_id': leg.betting_option_id,
+                            'leg_number': leg.leg_number,
+                            'american_odds': leg.american_odds,
+                            'decimal_odds': leg.decimal_odds,
+                            'outcome_name': leg.outcome_name,
+                            'outcome_point': leg.outcome_point,
+                            'market_type': leg.market_type,
+                            'bookmaker': leg.betting_option.bookmaker,
+                            'gameInfo': {
+                                'home_team': leg.betting_option.game.home_team,
+                                'away_team': leg.betting_option.game.away_team,
+                                'start_time': leg.betting_option.game.start_time.isoformat()
+                            }
+                        } for leg in parlay.legs
+                    ]
+                }
+                user1_bets_data.append(parlay_data)
+            
+            for parlay in user2_parlay_bets:
+                parlay_data = {
+                    'id': f"parlay_{parlay.id}",
+                    'amount': parlay.amount,
+                    'potential_payout': parlay.potential_payout,
+                    'status': parlay.status,
+                    'betting_option': {
+                        'id': parlay.id,
+                        'outcome_name': f"Parlay ({parlay.legs.count()} legs)",
+                        'outcome_point': None,
+                        'bookmaker': 'Multiple',
+                        'american_odds': int((parlay.decimal_odds - 1) * 100) if parlay.decimal_odds > 1 else int(-100 / (parlay.decimal_odds - 1)),
+                        'decimal_odds': parlay.decimal_odds,
+                        'market_type': 'parlay'
+                    },
+                    'game': {
+                        'id': 'parlay',
+                        'home_team': 'Parlay',
+                        'away_team': 'Bet',
+                        'start_time': parlay.created_at.isoformat()
+                    },
+                    'is_parlay': True,
+                    'parlay_legs': [
+                        {
+                            'id': leg.id,
+                            'parlay_bet_id': leg.parlay_bet_id,
+                            'betting_option_id': leg.betting_option_id,
+                            'leg_number': leg.leg_number,
+                            'american_odds': leg.american_odds,
+                            'decimal_odds': leg.decimal_odds,
+                            'outcome_name': leg.outcome_name,
+                            'outcome_point': leg.outcome_point,
+                            'market_type': leg.market_type,
+                            'bookmaker': leg.betting_option.bookmaker,
+                            'gameInfo': {
+                                'home_team': leg.betting_option.game.home_team,
+                                'away_team': leg.betting_option.game.away_team,
+                                'start_time': leg.betting_option.game.start_time.isoformat()
+                            }
+                        } for leg in parlay.legs
+                    ]
+                }
+                user2_bets_data.append(parlay_data)
             
             matchup_data = {
                 'id': matchup.id,

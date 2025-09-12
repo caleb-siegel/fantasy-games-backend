@@ -1,8 +1,9 @@
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from app import db
-from app.models import User, LeagueMember, Matchup, Bet, Game, BettingOption
+from app.models import User, LeagueMember, Matchup, Bet, Game, BettingOption, ParlayBet, ParlayLeg
 from app.services.odds_service import OddsService
+from app.services.parlay_service import calculate_parlay_from_options, validate_parlay_bets
 from datetime import datetime, timedelta
 import os
 
@@ -463,3 +464,159 @@ def force_process_outcomes():
         
     except Exception as e:
         return jsonify({'error': 'Failed to process outcomes', 'details': str(e)}), 500
+
+
+@bets_bp.route('/parlay', methods=['POST'])
+@jwt_required()
+def place_parlay_bet():
+    """Place a parlay bet combining multiple betting options"""
+    try:
+        data = request.get_json()
+        user_id = int(get_jwt_identity())
+        
+        # Check if user is a member of any league
+        if not check_user_league_membership(user_id):
+            return jsonify({'error': 'You must join a league before placing bets'}), 403
+        
+        # Validate required fields
+        required_fields = ['matchup_id', 'betting_option_ids', 'amount', 'week']
+        if not data or not all(field in data for field in required_fields):
+            return jsonify({'error': 'Missing required fields'}), 400
+        
+        matchup_id = data['matchup_id']
+        betting_option_ids = data['betting_option_ids']
+        amount = float(data['amount'])
+        week = int(data['week'])
+        
+        # Validate amount
+        if amount <= 0 or amount > 100:
+            return jsonify({'error': 'Bet amount must be between $1 and $100'}), 400
+        
+        # Validate parlay has at least 2 legs
+        if len(betting_option_ids) < 2:
+            return jsonify({'error': 'Parlay must have at least 2 legs'}), 400
+        
+        if len(betting_option_ids) > 10:
+            return jsonify({'error': 'Parlay cannot have more than 10 legs'}), 400
+        
+        # Check if user is part of the matchup
+        matchup = Matchup.query.get(matchup_id)
+        if not matchup:
+            return jsonify({'error': 'Matchup not found'}), 404
+        
+        if user_id not in [matchup.user1_id, matchup.user2_id]:
+            return jsonify({'error': 'You are not part of this matchup'}), 403
+        
+        # Get all betting options and validate them
+        betting_options = []
+        for option_id in betting_option_ids:
+            option = BettingOption.query.get(option_id)
+            if not option:
+                return jsonify({'error': f'Betting option {option_id} not found'}), 404
+            
+            if option.is_locked:
+                return jsonify({'error': 'Cannot include locked betting options in parlay'}), 400
+            
+            # Check if game has already started
+            if datetime.utcnow() >= option.game.start_time:
+                return jsonify({'error': 'Cannot bet on games that have already started'}), 400
+            
+            betting_options.append(option.to_dict())
+        
+        # Validate parlay (check for different games)
+        try:
+            validate_parlay_bets(betting_options)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        
+        # Calculate parlay information
+        parlay_info = calculate_parlay_from_options(amount, betting_options)
+        
+        # Check if user has enough budget remaining
+        existing_bets = Bet.query.filter_by(user_id=user_id, week=week).all()
+        existing_parlays = ParlayBet.query.filter_by(user_id=user_id, week=week).all()
+        
+        total_spent = sum(bet.amount for bet in existing_bets) + sum(parlay.amount for parlay in existing_parlays)
+        remaining_budget = 100 - total_spent
+        
+        if amount > remaining_budget:
+            return jsonify({'error': f'Insufficient budget. You have ${remaining_budget:.2f} remaining'}), 400
+        
+        # Create parlay bet
+        parlay_bet = ParlayBet(
+            user_id=user_id,
+            matchup_id=matchup_id,
+            amount=amount,
+            potential_payout=parlay_info['return'],
+            decimal_odds=parlay_info['decimal_odds'],
+            week=week
+        )
+        
+        db.session.add(parlay_bet)
+        db.session.flush()  # Get the parlay_bet ID
+        
+        # Create parlay legs
+        for leg_info in parlay_info['legs']:
+            betting_option = BettingOption.query.get(leg_info['betting_option_id'])
+            parlay_leg = ParlayLeg(
+                parlay_bet_id=parlay_bet.id,
+                betting_option_id=leg_info['betting_option_id'],
+                leg_number=leg_info['leg_number'],
+                american_odds=leg_info['american_odds'],
+                decimal_odds=leg_info['decimal_odds'],
+                outcome_name=leg_info['outcome_name'],
+                outcome_point=leg_info['outcome_point'],
+                market_type=leg_info['market_type'],
+                bookmaker=leg_info['bookmaker'],
+                game_id=leg_info['game_id'],
+                result='pending'
+            )
+            db.session.add(parlay_leg)
+        
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'Parlay bet placed successfully',
+            'parlay_bet': parlay_bet.to_dict()
+        }), 201
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': 'Failed to place parlay bet', 'details': str(e)}), 500
+
+
+@bets_bp.route('/parlay/week/<int:week>', methods=['GET'])
+@jwt_required()
+def get_user_parlay_bets(week):
+    """Get user's parlay bets for a specific week"""
+    try:
+        user_id = int(get_jwt_identity())
+        
+        parlay_bets = ParlayBet.query.filter_by(user_id=user_id, week=week).all()
+        
+        return jsonify({
+            'week': week,
+            'parlay_bets': [parlay_bet.to_dict() for parlay_bet in parlay_bets]
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to get parlay bets', 'details': str(e)}), 500
+
+
+@bets_bp.route('/parlay/<int:parlay_id>', methods=['GET'])
+@jwt_required()
+def get_parlay_bet_details(parlay_id):
+    """Get detailed information about a specific parlay bet"""
+    try:
+        user_id = int(get_jwt_identity())
+        
+        parlay_bet = ParlayBet.query.filter_by(id=parlay_id, user_id=user_id).first()
+        if not parlay_bet:
+            return jsonify({'error': 'Parlay bet not found'}), 404
+        
+        return jsonify({
+            'parlay_bet': parlay_bet.to_dict()
+        }), 200
+        
+    except Exception as e:
+        return jsonify({'error': 'Failed to get parlay bet details', 'details': str(e)}), 500

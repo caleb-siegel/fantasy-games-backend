@@ -224,3 +224,74 @@ class BettingOption(db.Model):
             'created_at': self.created_at.isoformat(),
             'game': self.game.to_dict() if self.game else None
         }
+
+class ParlayBet(db.Model):
+    __tablename__ = 'parlay_bets'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    matchup_id = db.Column(db.Integer, db.ForeignKey('matchups.id'), nullable=False)
+    amount = db.Column(db.Float, nullable=False)
+    potential_payout = db.Column(db.Float, nullable=False)
+    decimal_odds = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(20), default='pending')  # pending, locked, won, lost, cancelled
+    week = db.Column(db.Integer, nullable=False)
+    locked_at = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    legs = db.relationship('ParlayLeg', backref='parlay_bet', lazy='dynamic', cascade='all, delete-orphan')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'user_id': self.user_id,
+            'matchup_id': self.matchup_id,
+            'amount': self.amount,
+            'potential_payout': self.potential_payout,
+            'decimal_odds': self.decimal_odds,
+            'status': self.status,
+            'week': self.week,
+            'locked_at': self.locked_at.isoformat() if self.locked_at else None,
+            'created_at': self.created_at.isoformat(),
+            'legs': [leg.to_dict() for leg in self.legs],
+            'leg_count': self.legs.count()
+        }
+
+class ParlayLeg(db.Model):
+    __tablename__ = 'parlay_legs'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    parlay_bet_id = db.Column(db.Integer, db.ForeignKey('parlay_bets.id'), nullable=False)
+    betting_option_id = db.Column(db.Integer, db.ForeignKey('betting_options.id'), nullable=False)
+    leg_number = db.Column(db.Integer, nullable=False)
+    american_odds = db.Column(db.Integer, nullable=False)
+    decimal_odds = db.Column(db.Float, nullable=False)
+    outcome_name = db.Column(db.String(100), nullable=False)
+    outcome_point = db.Column(db.Float, nullable=True)
+    market_type = db.Column(db.String(20), nullable=False)
+    bookmaker = db.Column(db.String(50), nullable=False)
+    game_id = db.Column(db.String(50), nullable=False)
+    result = db.Column(db.String(20), nullable=True)  # won, lost, pending, void
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    betting_option = db.relationship('BettingOption', backref='parlay_legs')
+    
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'parlay_bet_id': self.parlay_bet_id,
+            'betting_option_id': self.betting_option_id,
+            'leg_number': self.leg_number,
+            'american_odds': self.american_odds,
+            'decimal_odds': self.decimal_odds,
+            'outcome_name': self.outcome_name,
+            'outcome_point': self.outcome_point,
+            'market_type': self.market_type,
+            'bookmaker': self.bookmaker,
+            'game_id': self.game_id,
+            'result': self.result,
+            'created_at': self.created_at.isoformat(),
+            'betting_option': self.betting_option.to_dict() if self.betting_option else None
+        }
